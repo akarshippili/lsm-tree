@@ -34,8 +34,8 @@ func main() {
 	if err != nil {
 		println(err)
 	}
-	fmt.Printf("%+v\n", entries)
+	fmt.Printf("entries: %+v\n", entries)
 
 	index := sstable.GetIndex()
-	fmt.Printf("%+v\n", index)
+	fmt.Printf("index: %+v\n", index)
 }
