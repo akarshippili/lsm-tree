@@ -2,7 +2,6 @@ package lsmtree
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"os"
 )
@@ -18,7 +17,7 @@ func NewSSTable(path string, entries []Entry) *SSTable {
 
 func (s *SSTable) Write() error {
 	file, err := os.Create(s.path)
-	index := make(map[string]int64)
+	pindex := make(map[string])
 	prevOffset := int64(0)
 	indexOffset := int64(0)
 
@@ -56,8 +55,8 @@ func (s *SSTable) Write() error {
 	newOffset, _ := file.Seek(0, io.SeekCurrent)
 
 	indexOffset = newOffset
-	fmt.Println("index offset: ", indexOffset)
-	fmt.Println("index: ", index)
+	defaultLogger.Debug("index offset: %d", indexOffset)
+	defaultLogger.Debug("index: %v", index)
 
 	for key, offset := range index {
 		keyLen := uint32(len(key))
@@ -135,7 +134,7 @@ func (s *SSTable) GetIndex() map[string]int64 {
 		binary.Read(file, binary.BigEndian, &offset)
 		result[string(key)] = int64(offset)
 
-		fmt.Printf("%s: %d\n", string(key), offset)
+		defaultLogger.Debug("index entry %s: %d", string(key), offset)
 	}
 
 	return result
