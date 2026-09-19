@@ -17,7 +17,7 @@ func NewSSTable(path string, entries []Entry) *SSTable {
 
 func (s *SSTable) Write() error {
 	file, err := os.Create(s.path)
-	pindex := make(map[string])
+	index := make(map[string]int64)
 	prevOffset := int64(0)
 	indexOffset := int64(0)
 
