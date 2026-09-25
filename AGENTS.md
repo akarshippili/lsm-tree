@@ -19,7 +19,7 @@ cd test && go run . -log-level debug             # demo binary; MUST run from te
 ## SSTable format gotchas (see `sstable.go`)
 
 - Data section ends with a literal `END` sentinel key; a real key named `END` truncates `Read()`.
-- Index section is written by iterating a Go map, so its on-disk order is nondeterministic. Do not write tests that assume index entry order.
+- Index section is written in data-section order, so it is sorted only if `entries` passed to `NewSSTable` are sorted (`MemTable.Entries()` sorts). `GetIndex()` returns `[]IndexEntry` in on-disk order.
 - Index entry offsets are `uint32`, but footer `indexLen`/`indexOffset` are `uint64`. Keep both sides in sync if changing either.
 - Sparse index records every 16th entry (`entryIndex % 16 == 0`).
 - Deletes store the literal string `__tombstone__` (`Tombstone` const) as the value; `Get` returns it as a normal value.
