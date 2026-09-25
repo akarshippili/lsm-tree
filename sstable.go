@@ -18,7 +18,6 @@ func NewSSTable(path string, entries []Entry) *SSTable {
 func (s *SSTable) Write() error {
 	file, err := os.Create(s.path)
 	index := make(map[string]int64)
-	prevOffset := int64(0)
 	indexOffset := int64(0)
 
 	if err != nil {
@@ -28,6 +27,11 @@ func (s *SSTable) Write() error {
 	defer file.Close()
 
 	for entryIndex, entry := range s.entries {
+		entryStart, _ := file.Seek(0, io.SeekCurrent)
+		if entryIndex%16 == 0 {
+			index[entry.Key] = entryStart
+		}
+
 		keyLen := uint32(len(entry.Key))
 		valueLen := uint32(len(entry.Value))
 
@@ -35,13 +39,6 @@ func (s *SSTable) Write() error {
 		file.WriteString(entry.Key)
 		binary.Write(file, binary.BigEndian, valueLen)
 		file.WriteString(entry.Value)
-		newOffset, _ := file.Seek(0, io.SeekCurrent)
-
-		if entryIndex%16 == 0 {
-			index[entry.Key] = prevOffset
-		}
-
-		prevOffset = newOffset
 	}
 
 	tombstoneEntry := Entry{Key: "END", Value: ""}
