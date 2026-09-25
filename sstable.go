@@ -2,10 +2,16 @@ package lsmtree
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"os"
 )
+
+// IndexEntry maps a key in the sparse index to the byte offset of its entry
+// in the data section.
+type IndexEntry struct {
+	Key    string
+	Offset int64
+}
 
 type SSTable struct {
 	entries []Entry
@@ -18,8 +24,7 @@ func NewSSTable(path string, entries []Entry) *SSTable {
 
 func (s *SSTable) Write() error {
 	file, err := os.Create(s.path)
-	index := make(map[string]int64)
-	prevOffset := int64(0)
+	index := []IndexEntry{}
 	indexOffset := int64(0)
 
 	if err != nil {
@@ -29,6 +34,11 @@ func (s *SSTable) Write() error {
 	defer file.Close()
 
 	for entryIndex, entry := range s.entries {
+		entryStart, _ := file.Seek(0, io.SeekCurrent)
+		if entryIndex%16 == 0 {
+			index = append(index, IndexEntry{Key: entry.Key, Offset: entryStart})
+		}
+
 		keyLen := uint32(len(entry.Key))
 		valueLen := uint32(len(entry.Value))
 
@@ -36,34 +46,17 @@ func (s *SSTable) Write() error {
 		file.WriteString(entry.Key)
 		binary.Write(file, binary.BigEndian, valueLen)
 		file.WriteString(entry.Value)
-		newOffset, _ := file.Seek(0, io.SeekCurrent)
-
-		if entryIndex%16 == 0 {
-			index[entry.Key] = prevOffset
-		}
-
-		prevOffset = newOffset
 	}
 
-	tombstoneEntry := Entry{Key: "END", Value: ""}
-	keyLen := uint32(len(tombstoneEntry.Key))
-	valueLen := uint32(len(tombstoneEntry.Value))
+	indexOffset, _ = file.Seek(0, io.SeekCurrent)
+	defaultLogger.Debug("index offset: %d", indexOffset)
+	defaultLogger.Debug("index: %v", index)
 
-	binary.Write(file, binary.BigEndian, keyLen)
-	file.WriteString(tombstoneEntry.Key)
-	binary.Write(file, binary.BigEndian, valueLen)
-	file.WriteString(tombstoneEntry.Value)
-	newOffset, _ := file.Seek(0, io.SeekCurrent)
-
-	indexOffset = newOffset
-	fmt.Println("index offset: ", indexOffset)
-	fmt.Println("index: ", index)
-
-	for key, offset := range index {
-		keyLen := uint32(len(key))
+	for _, e := range index {
+		keyLen := uint32(len(e.Key))
 		binary.Write(file, binary.BigEndian, keyLen)
-		file.WriteString(key)
-		binary.Write(file, binary.BigEndian, uint32(offset))
+		file.WriteString(e.Key)
+		binary.Write(file, binary.BigEndian, uint32(e.Offset))
 	}
 
 	indexLen := uint64(len(index))
@@ -81,7 +74,18 @@ func (s *SSTable) Read() ([]Entry, error) {
 	defer file.Close()
 	result := []Entry{}
 
+	// The data section ends where the index section begins.
+	_, dataEnd := s.getIndexLenAndOffset()
+
 	for {
+		pos, err := file.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+		if pos >= dataEnd {
+			break
+		}
+
 		var keyLen uint32
 		if err := binary.Read(file, binary.BigEndian, &keyLen); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -92,10 +96,6 @@ func (s *SSTable) Read() ([]Entry, error) {
 
 		key := make([]byte, keyLen)
 		file.Read(key)
-
-		if string(key) == "END" {
-			break
-		}
 
 		var valueLen uint32
 		if err := binary.Read(file, binary.BigEndian, &valueLen); err != nil {
@@ -112,8 +112,10 @@ func (s *SSTable) Read() ([]Entry, error) {
 	return result, nil
 }
 
-func (s *SSTable) GetIndex() map[string]int64 {
-	result := make(map[string]int64)
+// GetIndex returns the sparse index in on-disk order, which is key order when
+// the entries passed to NewSSTable were sorted.
+func (s *SSTable) GetIndex() []IndexEntry {
+	result := []IndexEntry{}
 	file, err := os.Open(s.path)
 
 	if err != nil {
@@ -133,9 +135,9 @@ func (s *SSTable) GetIndex() map[string]int64 {
 
 		var offset uint32
 		binary.Read(file, binary.BigEndian, &offset)
-		result[string(key)] = int64(offset)
+		result = append(result, IndexEntry{Key: string(key), Offset: int64(offset)})
 
-		fmt.Printf("%s: %d\n", string(key), offset)
+		defaultLogger.Debug("index entry %s: %d", string(key), offset)
 	}
 
 	return result
