@@ -48,17 +48,7 @@ func (s *SSTable) Write() error {
 		file.WriteString(entry.Value)
 	}
 
-	tombstoneEntry := Entry{Key: "END", Value: ""}
-	keyLen := uint32(len(tombstoneEntry.Key))
-	valueLen := uint32(len(tombstoneEntry.Value))
-
-	binary.Write(file, binary.BigEndian, keyLen)
-	file.WriteString(tombstoneEntry.Key)
-	binary.Write(file, binary.BigEndian, valueLen)
-	file.WriteString(tombstoneEntry.Value)
-	newOffset, _ := file.Seek(0, io.SeekCurrent)
-
-	indexOffset = newOffset
+	indexOffset, _ = file.Seek(0, io.SeekCurrent)
 	defaultLogger.Debug("index offset: %d", indexOffset)
 	defaultLogger.Debug("index: %v", index)
 
@@ -84,7 +74,18 @@ func (s *SSTable) Read() ([]Entry, error) {
 	defer file.Close()
 	result := []Entry{}
 
+	// The data section ends where the index section begins.
+	_, dataEnd := s.getIndexLenAndOffset()
+
 	for {
+		pos, err := file.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+		if pos >= dataEnd {
+			break
+		}
+
 		var keyLen uint32
 		if err := binary.Read(file, binary.BigEndian, &keyLen); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -95,10 +96,6 @@ func (s *SSTable) Read() ([]Entry, error) {
 
 		key := make([]byte, keyLen)
 		file.Read(key)
-
-		if string(key) == "END" {
-			break
-		}
 
 		var valueLen uint32
 		if err := binary.Read(file, binary.BigEndian, &valueLen); err != nil {
