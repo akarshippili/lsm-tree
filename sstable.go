@@ -144,19 +144,89 @@ func (s *SSTable) GetIndex() []IndexEntry {
 	return result
 }
 
-// floorIndex returns the index entry with the largest key <= key. Since the
-// index is sparse, that entry marks where a scan for key should start. It
+// Get looks up key using the sparse index. It seeks to the index entry with
+// the largest key <= key and scans that block, which ends at the next index
+// entry or at the end of the data section. A deleted key is found with the
+// value Tombstone.
+func (s *SSTable) Get(key string) (string, bool, error) {
+	file, err := os.Open(s.path)
+	if err != nil {
+		return "", false, err
+	}
+
+	defer file.Close()
+
+	index := s.GetIndex()
+	i, ok := floorIndex(index, key)
+	if !ok {
+		return "", false, nil
+	}
+
+	// The block runs up to the next index entry, or to the end of the data
+	// section for the last block.
+	_, blockEnd := s.getIndexLenAndOffset()
+	if i+1 < len(index) {
+		blockEnd = index[i+1].Offset
+	}
+
+	pos := index[i].Offset
+	if _, err := file.Seek(pos, io.SeekStart); err != nil {
+		return "", false, err
+	}
+
+	for pos < blockEnd {
+		var keyLen uint32
+		if err := binary.Read(file, binary.BigEndian, &keyLen); err != nil {
+			return "", false, err
+		}
+
+		k := make([]byte, keyLen)
+		if _, err := io.ReadFull(file, k); err != nil {
+			return "", false, err
+		}
+
+		var valueLen uint32
+		if err := binary.Read(file, binary.BigEndian, &valueLen); err != nil {
+			return "", false, err
+		}
+
+		// Keys are sorted, so once we pass key it is not in the table.
+		if string(k) > key {
+			return "", false, nil
+		}
+
+		if string(k) == key {
+			value := make([]byte, valueLen)
+			if _, err := io.ReadFull(file, value); err != nil {
+				return "", false, err
+			}
+			return string(value), true, nil
+		}
+
+		// Skip the value of a non-matching entry without reading it.
+		if _, err := file.Seek(int64(valueLen), io.SeekCurrent); err != nil {
+			return "", false, err
+		}
+		pos += 4 + int64(keyLen) + 4 + int64(valueLen)
+	}
+
+	return "", false, nil
+}
+
+// floorIndex returns the position of the index entry with the largest key <=
+// key. Since the index is sparse, that entry marks where a scan for key should
+// start, and the entry after it marks where the scan can stop. It
 // returns false if every index key is greater than key, meaning key is not in
 // the SSTable. index must be sorted by key.
-func floorIndex(index []IndexEntry, key string) (IndexEntry, bool) {
+func floorIndex(index []IndexEntry, key string) (int, bool) {
 	// i is the first entry whose key is > key, so i-1 is the floor.
 	i := sort.Search(len(index), func(i int) bool {
 		return index[i].Key > key
 	})
 	if i == 0 {
-		return IndexEntry{}, false
+		return 0, false
 	}
-	return index[i-1], true
+	return i - 1, true
 }
 
 func (s *SSTable) getIndexLenAndOffset() (int64, int64) {
