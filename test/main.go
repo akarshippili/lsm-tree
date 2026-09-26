@@ -23,7 +23,7 @@ func main() {
 	}
 
 	entries := []lsmtree.Entry{}
-	for i := range(100) {
+	for i := range 100 {
 		entries = append(entries, lsmtree.Entry{Key: fmt.Sprintf("key-%d", i), Value: fmt.Sprintf("value-%d", i)})
 	}
 
