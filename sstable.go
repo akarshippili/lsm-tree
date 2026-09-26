@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"sort"
 )
 
 // IndexEntry maps a key in the sparse index to the byte offset of its entry
@@ -141,6 +142,21 @@ func (s *SSTable) GetIndex() []IndexEntry {
 	}
 
 	return result
+}
+
+// floorIndex returns the index entry with the largest key <= key. Since the
+// index is sparse, that entry marks where a scan for key should start. It
+// returns false if every index key is greater than key, meaning key is not in
+// the SSTable. index must be sorted by key.
+func floorIndex(index []IndexEntry, key string) (IndexEntry, bool) {
+	// i is the first entry whose key is > key, so i-1 is the floor.
+	i := sort.Search(len(index), func(i int) bool {
+		return index[i].Key > key
+	})
+	if i == 0 {
+		return IndexEntry{}, false
+	}
+	return index[i-1], true
 }
 
 func (s *SSTable) getIndexLenAndOffset() (int64, int64) {

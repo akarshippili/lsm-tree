@@ -139,3 +139,39 @@ func TestSSTableWriteBadPath(t *testing.T) {
 		t.Error("Write() to a missing directory returned nil error")
 	}
 }
+
+func TestFloorIndex(t *testing.T) {
+	index := []IndexEntry{
+		{Key: "b", Offset: 0},
+		{Key: "d", Offset: 100},
+		{Key: "f", Offset: 200},
+	}
+
+	tests := []struct {
+		key    string
+		want   IndexEntry
+		wantOk bool
+	}{
+		{"a", IndexEntry{}, false},        // before the first key
+		{"b", IndexEntry{"b", 0}, true},   // exact match on the first key
+		{"c", IndexEntry{"b", 0}, true},   // between keys
+		{"d", IndexEntry{"d", 100}, true}, // exact match in the middle
+		{"e", IndexEntry{"d", 100}, true}, // between keys
+		{"f", IndexEntry{"f", 200}, true}, // exact match on the last key
+		{"z", IndexEntry{"f", 200}, true}, // after the last key
+		{"b0", IndexEntry{"b", 0}, true},  // prefix of the next key's range
+	}
+
+	for _, tt := range tests {
+		got, ok := floorIndex(index, tt.key)
+		if ok != tt.wantOk || got != tt.want {
+			t.Errorf("floorIndex(%q) = (%+v, %v), want (%+v, %v)", tt.key, got, ok, tt.want, tt.wantOk)
+		}
+	}
+}
+
+func TestFloorIndexEmpty(t *testing.T) {
+	if got, ok := floorIndex(nil, "a"); ok {
+		t.Errorf("floorIndex(nil, \"a\") = (%+v, true), want not found", got)
+	}
+}
