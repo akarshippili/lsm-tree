@@ -3,12 +3,16 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 
 	lsmtree "github.com/akarshippili/lsm-tree"
 )
 
 func main() {
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
+	path := flag.String("path", "data/sstable", "SSTable file to write, relative to the current directory")
 	flag.Parse()
 
 	switch *logLevel {
@@ -27,12 +31,18 @@ func main() {
 		entries = append(entries, lsmtree.Entry{Key: fmt.Sprintf("key-%d", i), Value: fmt.Sprintf("value-%d", i)})
 	}
 
-	sstable := lsmtree.NewSSTable("../data/sstable", entries)
-	sstable.Write()
+	if err := os.MkdirAll(filepath.Dir(*path), 0o755); err != nil {
+		log.Fatal(err)
+	}
+
+	sstable := lsmtree.NewSSTable(*path, entries)
+	if err := sstable.Write(); err != nil {
+		log.Fatal(err)
+	}
 
 	entries, err := sstable.Read()
 	if err != nil {
-		println(err)
+		log.Fatal(err)
 	}
 	fmt.Printf("entries: %+v\n", entries)
 
