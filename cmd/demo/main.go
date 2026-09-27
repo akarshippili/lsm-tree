@@ -45,8 +45,12 @@ func main() {
 	}
 	defer sstable.Close()
 
-	entries, err = sstable.Read()
-	if err != nil {
+	entries = nil
+	it := sstable.Iterator()
+	for it.Next() {
+		entries = append(entries, it.Entry())
+	}
+	if err := it.Err(); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("entries: %+v\n", entries)

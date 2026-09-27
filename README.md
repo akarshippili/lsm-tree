@@ -21,7 +21,8 @@ Sorted String Table — an immutable on-disk format for persisting sorted key-va
 - `WriteSSTable(path, entries)` — write sorted entries to disk with a sparse index (every 16th key)
 - `OpenSSTable(path)` — open an SSTable and load its index into memory; `Close()` when done
 - `Get(key)` — look up one key by binary searching the index and scanning a single block
-- `Read()` — read all entries from disk
+- `Iterator()` — iterate over every entry in key order, one at a time
+- `Scan(from)` — iterate over entries with keys >= `from`, starting at the block that could contain it
 - `Index()` — the sparse index mapping keys to file offsets
 
 #### File Format
@@ -46,7 +47,12 @@ Sorted String Table — an immutable on-disk format for persisting sorted key-va
 ```go
 package main
 
-import lsm "github.com/akarshippili/lsm-tree"
+import (
+    "fmt"
+    "log"
+
+    lsm "github.com/akarshippili/lsm-tree"
+)
 
 func main() {
     // Write to memtable
@@ -55,13 +61,27 @@ func main() {
     mt.Add("city", "seattle")
 
     // Flush to SSTable
-    lsm.WriteSSTable("data/sstable", mt.Entries())
+    if err := lsm.WriteSSTable("data/sstable", mt.Entries()); err != nil {
+        log.Fatal(err)
+    }
 
     // Read back
-    st, _ := lsm.OpenSSTable("data/sstable")
+    st, err := lsm.OpenSSTable("data/sstable")
+    if err != nil {
+        log.Fatal(err)
+    }
     defer st.Close()
-    city, found, _ := st.Get("city")
-    entries, _ := st.Read()
+
+    city, found, err := st.Get("city")
+    fmt.Println(city, found, err)
+
+    it := st.Iterator()
+    for it.Next() {
+        fmt.Println(it.Entry())
+    }
+    if err := it.Err(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 

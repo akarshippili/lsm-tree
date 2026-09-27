@@ -1,10 +1,8 @@
 package lsmtree
 
 import (
-	"bufio"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 )
@@ -30,78 +28,31 @@ type IndexEntry struct {
 
 // WriteSSTable writes entries to a new SSTable file at path, replacing any
 // existing file. entries must be sorted by key with no duplicates, as
-// MemTable.Entries returns them.
-func WriteSSTable(path string, entries []Entry) (err error) {
-	file, err := os.Create(path)
-
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if cerr := file.Close(); err == nil {
-			err = cerr
-		}
-	}()
-
-	w := &countingWriter{w: bufio.NewWriter(file)}
+// MemTable.Entries returns them. The file is built in memory and written in
+// one call, so offsets are just positions in the buffer.
+func WriteSSTable(path string, entries []Entry) error {
+	var b []byte
 	index := []IndexEntry{}
 
-	for i, entry := range entries {
+	for i, e := range entries {
 		if i%indexInterval == 0 {
-			index = append(index, IndexEntry{Key: entry.Key, Offset: w.n})
+			index = append(index, IndexEntry{Key: e.Key, Offset: int64(len(b))})
 		}
-		w.writeUint32(uint32(len(entry.Key)))
-		w.writeString(entry.Key)
-		w.writeUint32(uint32(len(entry.Value)))
-		w.writeString(entry.Value)
+		b = appendBytes(b, e.Key)
+		b = appendBytes(b, e.Value)
 	}
 
-	indexOffset := w.n
-	defaultLogger.Debug("index offset: %d", indexOffset)
-	defaultLogger.Debug("index: %v", index)
-
+	indexOffset := len(b)
 	for _, e := range index {
-		w.writeUint32(uint32(len(e.Key)))
-		w.writeString(e.Key)
-		w.writeUint32(uint32(e.Offset))
+		b = appendBytes(b, e.Key)
+		b = binary.BigEndian.AppendUint32(b, uint32(e.Offset))
 	}
 
-	w.writeUint64(uint64(len(index)))
-	w.writeUint64(uint64(indexOffset))
+	b = binary.BigEndian.AppendUint64(b, uint64(len(index)))
+	b = binary.BigEndian.AppendUint64(b, uint64(indexOffset))
 
-	if w.err != nil {
-		return w.err
-	}
-	return w.w.Flush()
-}
-
-// countingWriter tracks how many bytes have been written, so WriteSSTable
-// knows each entry's offset, and keeps the first error so callers can check
-// once at the end.
-type countingWriter struct {
-	w   *bufio.Writer
-	n   int64
-	err error
-}
-
-func (c *countingWriter) write(p []byte) {
-	if c.err != nil {
-		return
-	}
-	n, err := c.w.Write(p)
-	c.n += int64(n)
-	c.err = err
-}
-
-func (c *countingWriter) writeString(s string) { c.write([]byte(s)) }
-
-func (c *countingWriter) writeUint32(v uint32) {
-	c.write(binary.BigEndian.AppendUint32(nil, v))
-}
-
-func (c *countingWriter) writeUint64(v uint64) {
-	c.write(binary.BigEndian.AppendUint64(nil, v))
+	defaultLogger.Debug("index offset: %d, index: %v", indexOffset, index)
+	return os.WriteFile(path, b, 0o644)
 }
 
 // SSTable is an open, read-only SSTable file. Its sparse index is loaded into
@@ -149,16 +100,16 @@ func loadSSTable(file *os.File) (*SSTable, error) {
 		return nil, fmt.Errorf("index offset %d is past index end %d", indexOffset, indexEnd)
 	}
 
-	r := bufio.NewReader(io.NewSectionReader(file, int64(indexOffset), int64(indexEnd-indexOffset)))
+	r := newSectionReader(file, int64(indexOffset), int64(indexEnd))
 	index := []IndexEntry{}
 	for i := uint64(0); i < indexLen; i++ {
-		key, err := readBytes(r)
+		key, err := r.readBytes()
 		if err != nil {
-			return nil, fmt.Errorf("index entry %d: %w", i, unexpectedEOF(err))
+			return nil, fmt.Errorf("index entry %d: %w", i, err)
 		}
-		offset, err := readUint32(r)
+		offset, err := r.readUint32()
 		if err != nil {
-			return nil, fmt.Errorf("index entry %d: %w", i, unexpectedEOF(err))
+			return nil, fmt.Errorf("index entry %d: %w", i, err)
 		}
 		index = append(index, IndexEntry{Key: string(key), Offset: int64(offset)})
 		defaultLogger.Debug("index entry %s: %d", key, offset)
@@ -178,111 +129,85 @@ func (s *SSTable) Index() []IndexEntry {
 	return s.index
 }
 
-// Read returns every entry in the data section.
-func (s *SSTable) Read() ([]Entry, error) {
-	r := bufio.NewReader(io.NewSectionReader(s.file, 0, s.dataEnd))
-	result := []Entry{}
-
-	for {
-		key, err := readBytes(r)
-		if err == io.EOF {
-			return result, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		value, err := readBytes(r)
-		if err != nil {
-			return nil, unexpectedEOF(err)
-		}
-		result = append(result, Entry{Key: string(key), Value: string(value)})
-	}
+// Iterator reads SSTable entries in key order, one at a time. Use it like
+// bufio.Scanner: call Next until it returns false, then check Err.
+type Iterator struct {
+	r     *sectionReader
+	from  string // entries with keys < from are skipped
+	entry Entry
+	err   error
 }
 
-// Get looks up key using the sparse index. It finds the index entry with the
-// largest key <= key and scans that block, which ends at the next index entry
-// or at the end of the data section. A deleted key is found with the value
-// Tombstone.
+// Iterator returns an iterator over every entry in the table.
+func (s *SSTable) Iterator() *Iterator {
+	return s.iterator(0, s.dataEnd, "")
+}
+
+// Scan returns an iterator over the entries with keys >= from. It starts at
+// the block that could contain from, so it skips at most one block's worth of
+// smaller keys.
+func (s *SSTable) Scan(from string) *Iterator {
+	start := int64(0)
+	if i, ok := floorIndex(s.index, from); ok {
+		start = s.index[i].Offset
+	}
+	return s.iterator(start, s.dataEnd, from)
+}
+
+// iterator returns an iterator over the data between byte offsets start and
+// end, skipping keys < from.
+func (s *SSTable) iterator(start, end int64, from string) *Iterator {
+	return &Iterator{r: newSectionReader(s.file, start, end), from: from}
+}
+
+// Next advances to the next entry and reports whether there is one. It
+// returns false at the end of the table or on an error.
+func (it *Iterator) Next() bool {
+	for it.err == nil && it.r.left > 0 {
+		e, err := it.r.readEntry()
+		if err != nil {
+			it.err = err
+			return false
+		}
+		if e.Key >= it.from {
+			it.entry = e
+			return true
+		}
+	}
+	return false
+}
+
+// Entry returns the entry Next just advanced to.
+func (it *Iterator) Entry() Entry {
+	return it.entry
+}
+
+// Err returns the error that stopped the iterator, or nil if it reached the
+// end of the table.
+func (it *Iterator) Err() error {
+	return it.err
+}
+
+// Get looks up key using the sparse index. It finds the block that could
+// contain key, which runs from the floor index entry to the next index entry
+// (or the end of the data), and returns the first entry there with key >= key
+// if it matches. A deleted key is found with the value Tombstone.
 func (s *SSTable) Get(key string) (string, bool, error) {
 	i, ok := floorIndex(s.index, key)
 	if !ok {
 		return "", false, nil
 	}
 
-	blockStart := s.index[i].Offset
-	blockEnd := s.dataEnd
+	end := s.dataEnd
 	if i+1 < len(s.index) {
-		blockEnd = s.index[i+1].Offset
+		end = s.index[i+1].Offset
 	}
 
-	r := bufio.NewReader(io.NewSectionReader(s.file, blockStart, blockEnd-blockStart))
-	for {
-		k, err := readBytes(r)
-		if err == io.EOF {
-			return "", false, nil
-		}
-		if err != nil {
-			return "", false, err
-		}
-
-		valueLen, err := readUint32(r)
-		if err != nil {
-			return "", false, unexpectedEOF(err)
-		}
-
-		// Keys are sorted, so once we pass key it is not in the table.
-		if string(k) > key {
-			return "", false, nil
-		}
-
-		if string(k) == key {
-			value := make([]byte, valueLen)
-			if _, err := io.ReadFull(r, value); err != nil {
-				return "", false, unexpectedEOF(err)
-			}
-			return string(value), true, nil
-		}
-
-		// Skip the value of a non-matching entry without reading it.
-		if _, err := r.Discard(int(valueLen)); err != nil {
-			return "", false, unexpectedEOF(err)
-		}
+	it := s.iterator(s.index[i].Offset, end, key)
+	if it.Next() && it.Entry().Key == key {
+		return it.Entry().Value, true, nil
 	}
-}
-
-// readBytes reads a uint32 length followed by that many bytes. It returns
-// io.EOF only if r was already at its end, and io.ErrUnexpectedEOF if the
-// record is cut short.
-func readBytes(r *bufio.Reader) ([]byte, error) {
-	n, err := readUint32(r)
-	if err != nil {
-		return nil, err
-	}
-	b := make([]byte, n)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return nil, unexpectedEOF(err)
-	}
-	return b, nil
-}
-
-// readUint32 reads a big-endian uint32. Like io.ReadFull, it returns io.EOF
-// if no bytes were read and io.ErrUnexpectedEOF if only some were.
-func readUint32(r *bufio.Reader) (uint32, error) {
-	var b [4]byte
-	if _, err := io.ReadFull(r, b[:]); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint32(b[:]), nil
-}
-
-// unexpectedEOF turns io.EOF into io.ErrUnexpectedEOF, for reads in the middle
-// of a record where hitting the end means the file is truncated.
-func unexpectedEOF(err error) error {
-	if err == io.EOF {
-		return io.ErrUnexpectedEOF
-	}
-	return err
+	return "", false, it.Err()
 }
 
 // floorIndex returns the position of the index entry with the largest key <=
