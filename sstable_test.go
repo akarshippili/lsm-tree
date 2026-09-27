@@ -1,13 +1,32 @@
 package lsmtree
 
 import (
+	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
-// writeSSTable builds a memtable from kv pairs, writes it to a temp file, and
-// returns the SSTable along with the sorted entries that were written.
+// writeAndOpen writes entries to a temp SSTable file and opens it. The table
+// is closed when the test ends.
+func writeAndOpen(t *testing.T, entries []Entry) *SSTable {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sstable")
+	if err := WriteSSTable(path, entries); err != nil {
+		t.Fatalf("WriteSSTable() error = %v", err)
+	}
+	s, err := OpenSSTable(path)
+	if err != nil {
+		t.Fatalf("OpenSSTable() error = %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// writeSSTable builds a memtable from kv pairs, writes and opens it as an
+// SSTable, and returns it along with the sorted entries that were written.
 func writeSSTable(t *testing.T, kv map[string]string) (*SSTable, []Entry) {
 	t.Helper()
 	m := NewMemTable()
@@ -15,12 +34,7 @@ func writeSSTable(t *testing.T, kv map[string]string) (*SSTable, []Entry) {
 		m.Add(k, v)
 	}
 	entries := m.Entries()
-
-	s := NewSSTable(filepath.Join(t.TempDir(), "sstable"), entries)
-	if err := s.Write(); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	return s, entries
+	return writeAndOpen(t, entries), entries
 }
 
 func TestSSTableRoundTrip(t *testing.T) {
@@ -54,8 +68,8 @@ func TestSSTableEmpty(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("Read() returned %d entries, want 0", len(got))
 	}
-	if index := s.GetIndex(); len(index) != 0 {
-		t.Errorf("GetIndex() returned %d entries, want 0", len(index))
+	if index := s.Index(); len(index) != 0 {
+		t.Errorf("Index() returned %d entries, want 0", len(index))
 	}
 }
 
@@ -76,11 +90,7 @@ func TestSSTableTombstoneValue(t *testing.T) {
 	m.Add("keep", "v")
 	m.Add("gone", "v")
 	m.Delete("gone")
-
-	s := NewSSTable(filepath.Join(t.TempDir(), "sstable"), m.Entries())
-	if err := s.Write(); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	s := writeAndOpen(t, m.Entries())
 
 	got, err := s.Read()
 	if err != nil {
@@ -117,9 +127,9 @@ func TestSSTableIndex(t *testing.T) {
 		offset += int64(8 + len(e.Key) + len(e.Value))
 	}
 
-	got := s.GetIndex()
+	got := s.Index()
 	if len(got) != len(want) {
-		t.Fatalf("GetIndex() returned %d entries, want %d", len(got), len(want))
+		t.Fatalf("Index() returned %d entries, want %d", len(got), len(want))
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -134,9 +144,9 @@ func TestSSTableIndex(t *testing.T) {
 }
 
 func TestSSTableWriteBadPath(t *testing.T) {
-	s := NewSSTable(filepath.Join(t.TempDir(), "missing-dir", "sstable"), nil)
-	if err := s.Write(); err == nil {
-		t.Error("Write() to a missing directory returned nil error")
+	path := filepath.Join(t.TempDir(), "missing-dir", "sstable")
+	if err := WriteSSTable(path, nil); err == nil {
+		t.Error("WriteSSTable() to a missing directory returned nil error")
 	}
 }
 
@@ -218,11 +228,7 @@ func TestSSTableGetTombstone(t *testing.T) {
 	m := NewMemTable()
 	m.Add("gone", "v")
 	m.Delete("gone")
-
-	s := NewSSTable(filepath.Join(t.TempDir(), "sstable"), m.Entries())
-	if err := s.Write(); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	s := writeAndOpen(t, m.Entries())
 
 	val, ok, err := s.Get("gone")
 	if err != nil || !ok || val != Tombstone {
@@ -239,12 +245,60 @@ func TestSSTableGetEmpty(t *testing.T) {
 	}
 }
 
-func TestSSTableGetMissingFile(t *testing.T) {
-	s := NewSSTable(filepath.Join(t.TempDir(), "missing"), nil)
-
-	if _, _, err := s.Get("a"); err == nil {
-		t.Error("Get() on a missing file returned nil error")
+func TestOpenSSTableMissingFile(t *testing.T) {
+	if _, err := OpenSSTable(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("OpenSSTable() on a missing file returned nil error")
 	}
+}
+
+func TestOpenSSTableCorrupt(t *testing.T) {
+	footer := func(indexLen, indexOffset uint64) []byte {
+		b := binary.BigEndian.AppendUint64(nil, indexLen)
+		return binary.BigEndian.AppendUint64(b, indexOffset)
+	}
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"empty file", nil},
+		{"shorter than footer", []byte{1, 2, 3}},
+		{"index offset past end", footer(0, 100)},
+		{"index shorter than indexLen", footer(3, 0)},
+	}
+
+	for _, tt := range tests {
+		path := filepath.Join(t.TempDir(), "sstable")
+		if err := os.WriteFile(path, tt.data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if s, err := OpenSSTable(path); err == nil {
+			s.Close()
+			t.Errorf("%s: OpenSSTable() returned nil error", tt.name)
+		}
+	}
+}
+
+func TestSSTableConcurrentGet(t *testing.T) {
+	kv := map[string]string{}
+	for i := 0; i < 200; i++ {
+		kv[fmt.Sprintf("key-%03d", i)] = fmt.Sprintf("value-%d", i)
+	}
+	s, _ := writeSSTable(t, kv)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k, want := range kv {
+				if val, ok, err := s.Get(k); err != nil || !ok || val != want {
+					t.Errorf("Get(%q) = (%q, %v, %v), want (%q, true, nil)", k, val, ok, err, want)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestSSTableGetEveryKey(t *testing.T) {

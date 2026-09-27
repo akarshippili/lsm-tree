@@ -18,9 +18,11 @@ An in-memory sorted key-value store backed by a hashmap with thread-safe read/wr
 
 Sorted String Table — an immutable on-disk format for persisting sorted key-value data with a sparse index for efficient lookups.
 
-- `Write()` — flush sorted entries to disk with a sparse index (every 16th key)
+- `WriteSSTable(path, entries)` — write sorted entries to disk with a sparse index (every 16th key)
+- `OpenSSTable(path)` — open an SSTable and load its index into memory; `Close()` when done
+- `Get(key)` — look up one key by binary searching the index and scanning a single block
 - `Read()` — read all entries from disk
-- `GetIndex()` — retrieve the sparse index mapping keys to file offsets
+- `Index()` — the sparse index mapping keys to file offsets
 
 #### File Format
 
@@ -29,7 +31,6 @@ Sorted String Table — an immutable on-disk format for persisting sorted key-va
 │ Data Section                         │
 │  [keyLen | key | valueLen | value]   │
 │  ...                                 │
-│  [END marker]                        │
 ├──────────────────────────────────────┤
 │ Index Section (sparse, every 16th)   │
 │  [keyLen | key | offset]             │
@@ -45,7 +46,7 @@ Sorted String Table — an immutable on-disk format for persisting sorted key-va
 ```go
 package main
 
-import "github.com/akarshippili/lsm-tree"
+import lsm "github.com/akarshippili/lsm-tree"
 
 func main() {
     // Write to memtable
@@ -54,12 +55,13 @@ func main() {
     mt.Add("city", "seattle")
 
     // Flush to SSTable
-    st := lsm.NewSSTable("data/sstable", mt.Entries())
-    st.Write()
+    lsm.WriteSSTable("data/sstable", mt.Entries())
 
     // Read back
+    st, _ := lsm.OpenSSTable("data/sstable")
+    defer st.Close()
+    city, found, _ := st.Get("city")
     entries, _ := st.Read()
-    index := st.GetIndex()
 }
 ```
 

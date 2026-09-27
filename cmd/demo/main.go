@@ -35,17 +35,22 @@ func main() {
 		log.Fatal(err)
 	}
 
-	sstable := lsmtree.NewSSTable(*path, entries)
-	if err := sstable.Write(); err != nil {
+	if err := lsmtree.WriteSSTable(*path, entries); err != nil {
 		log.Fatal(err)
 	}
 
-	entries, err := sstable.Read()
+	sstable, err := lsmtree.OpenSSTable(*path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sstable.Close()
+
+	entries, err = sstable.Read()
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("entries: %+v\n", entries)
 
-	index := sstable.GetIndex()
+	index := sstable.Index()
 	fmt.Printf("index: %+v\n", index)
 }

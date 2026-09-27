@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Single-module Go library (`github.com/akarshippili/lsm-tree`, Go 1.25). Package name is `lsmtree`, not `lsm` as the README usage snippet suggests. No CI, Makefile, or linter config; `gofmt` and `go vet` are the only checks.
+Single-module Go library (`github.com/akarshippili/lsm-tree`, Go 1.25). Package name is `lsmtree` (the README imports it as `lsm`). CI (`.github/workflows/go.yml`) runs `go build` and `go test` on pushes and PRs to `main`; there is no Makefile or linter config, so also run `gofmt` and `go vet` locally.
 
 ## Commands
 
@@ -19,7 +19,8 @@ go run ./cmd/demo -log-level debug               # demo binary; writes data/ssta
 ## SSTable format gotchas (see `sstable.go`)
 
 - No end-of-data sentinel: `Read()` stops at the footer's `indexOffset`, which is where the data section ends.
-- Index section is written in data-section order, so it is sorted only if `entries` passed to `NewSSTable` are sorted (`MemTable.Entries()` sorts). `GetIndex()` returns `[]IndexEntry` in on-disk order.
+- Index section is written in data-section order, so it is sorted only if `entries` passed to `WriteSSTable` are sorted (`MemTable.Entries()` sorts).
+- `WriteSSTable` writes; `OpenSSTable` loads the footer and index once and keeps the file open (callers must `Close()`). Reads use `ReadAt` via `io.SectionReader`, so an `*SSTable` is safe for concurrent `Get`.
 - Index entry offsets are `uint32`, but footer `indexLen`/`indexOffset` are `uint64`. Keep both sides in sync if changing either.
 - Sparse index records every 16th entry (`entryIndex % 16 == 0`).
 - Deletes store the literal string `__tombstone__` (`Tombstone` const) as the value; `Get` returns it as a normal value.
